@@ -14,6 +14,7 @@ dependencies = [
     "trimesh",
     "pillow",
     "huggingface_hub",
+    "transformers>=4.45.0",
     "numpy",
     "torch==2.6.0",
     "torchvision",

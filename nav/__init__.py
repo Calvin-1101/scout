@@ -7,6 +7,7 @@ from .elevation import (
     pixel_to_bev_index,
 )
 from .traversability import elevation_to_cost_map
+from .waypoints import select_start_goal
 
 __all__ = [
     "astar",
@@ -17,4 +18,5 @@ __all__ = [
     "load_intrinsics_pixel",
     "pixel_to_bev_index",
     "elevation_to_cost_map",
+    "select_start_goal",
 ]

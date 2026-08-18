@@ -7,12 +7,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from nav.elevation import build_bev_elevation, load_intrinsics_pixel
+from nav.traversability import elevation_to_cost_map
+from nav.waypoints import select_start_goal
+from plan_ugv_path import load_depth
+
 
 def _run(cmd: list[str]) -> None:
     print('>', ' '.join(cmd))
     proc = subprocess.run(cmd, check=False)
     if proc.returncode != 0:
         raise SystemExit(proc.returncode)
+
 
 def _run_capture_stream(cmd: list[str]) -> str:
     """
@@ -98,7 +104,6 @@ def generate_cost_rgb_map(
         _run(cmd)
         return None, None
 
-    # interactive=True: parse printed START/GOAL coordinates after the user clicks.
     output = _run_capture_stream(cmd)
 
     starts = re.findall(r"START:\s*u,v\s*=\s*(\d+)\s*,\s*(\d+)", output)
@@ -109,6 +114,36 @@ def generate_cost_rgb_map(
     s_u, s_v = starts[0]
     g_u, g_v = goals[0]
     return f"{s_u},{s_v}", f"{g_u},{g_v}"
+
+
+def auto_pick_pixels(
+    depth_path: str,
+    intrinsics_path: str,
+    pitch_deg: float,
+    cam_height_m: float,
+    resolution: float,
+    slope_safe: float,
+    slope_max: float,
+) -> tuple[str, str] | None:
+    depth = load_depth(Path(depth_path))
+    h, w = depth.shape
+    K = load_intrinsics_pixel(intrinsics_path, w, h)
+    grid = build_bev_elevation(depth, K, pitch_deg, cam_height_m, resolution)
+    cost, _ = elevation_to_cost_map(
+        grid.elevation,
+        grid.resolution,
+        slope_safe_deg=slope_safe,
+        slope_max_deg=slope_max,
+    )
+    picked = select_start_goal(
+        depth, K, pitch_deg, cam_height_m, grid, cost
+    )
+    if picked is None:
+        return None
+    (su, sv), (gu, gv) = picked
+    print(f'AUTO START: u,v = {su},{sv}  (near bottom-left passable)')
+    print(f'AUTO GOAL:  u,v = {gu},{gv}  (farthest reachable BEV cell)')
+    return f'{su},{sv}', f'{gu},{gv}'
 
 
 def run_path_planning(
@@ -143,7 +178,7 @@ def run_path_planning(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='One-command pipeline: prepare -> refine -> cost_on_rgb -> optional A*'
+        description='One-command pipeline: prepare -> refine -> cost_on_rgb -> A*'
     )
     parser.add_argument('--image', required=True, help='Input RGB image path')
     parser.add_argument('--example-out', default='examples/my_scene')
@@ -156,13 +191,11 @@ def main() -> int:
     parser.add_argument('--resolution', type=float, default=0.5)
     parser.add_argument('--slope-safe', type=float, default=30.0)
     parser.add_argument('--slope-max', type=float, default=55.0)
-    parser.add_argument('--start', type=str, default=None, help='u,v')
-    parser.add_argument('--goal', type=str, default=None, help='u,v')
     parser.add_argument('--no-mask', action='store_true')
     parser.add_argument(
-        '--skip-click-ui',
+        '--click-ui',
         action='store_true',
-        help='Only generate cost_on_rgb.png and skip interactive clicks',
+        help='Pick start/goal by clicking; otherwise auto-pick',
     )
     args = parser.parse_args()
 
@@ -171,46 +204,59 @@ def main() -> int:
     depth_path = f"{args.result_out}/depth_refined.npy"
     intrinsics_path = f"{args.example_out}/intrinsics.txt"
     rgb_path = f"{args.result_out}/rgb.png"
-
-    prepare_inputs(args.image, example_out, args.scene, args.fov)
-    run_refinement(example_name, args.result_out, args.no_mask)
-    selected_start, selected_goal = generate_cost_rgb_map(
-        depth_path=depth_path,
-        intrinsics_path=intrinsics_path,
-        rgb_path=rgb_path,
+    geo = dict(
         pitch_deg=args.pitch_deg,
         cam_height_m=args.cam_height_m,
         resolution=args.resolution,
         slope_safe=args.slope_safe,
         slope_max=args.slope_max,
-        path_out=args.path_out,
-        interactive=not args.skip_click_ui,
     )
 
-    if args.start and args.goal:
-        start, goal = args.start, args.goal
-    elif selected_start and selected_goal:
-        start, goal = selected_start, selected_goal
-    else:
-        start, goal = None, None
+    prepare_inputs(args.image, example_out, args.scene, args.fov)
+    run_refinement(example_name, args.result_out, args.no_mask)
 
-    if start and goal:
-        run_path_planning(
+    start = goal = None
+    if args.click_ui:
+        start, goal = generate_cost_rgb_map(
             depth_path=depth_path,
             intrinsics_path=intrinsics_path,
             rgb_path=rgb_path,
-            pitch_deg=args.pitch_deg,
-            cam_height_m=args.cam_height_m,
-            resolution=args.resolution,
-            slope_safe=args.slope_safe,
-            slope_max=args.slope_max,
-            start=start,
-            goal=goal,
             path_out=args.path_out,
+            interactive=True,
+            **geo,
         )
+        if not (start and goal):
+            print('Click UI did not yield START/GOAL; falling back to auto-pick.')
     else:
-        print('Skipping final path planning: no START/GOAL selected (or pass --start and --goal).')
+        generate_cost_rgb_map(
+            depth_path=depth_path,
+            intrinsics_path=intrinsics_path,
+            rgb_path=rgb_path,
+            path_out=args.path_out,
+            interactive=False,
+            **geo,
+        )
 
+    if not (start and goal):
+        picked = auto_pick_pixels(
+            depth_path=depth_path,
+            intrinsics_path=intrinsics_path,
+            **geo,
+        )
+        if picked is None:
+            print('Skipping final path planning: could not auto-pick a passable start/goal.')
+            return 1
+        start, goal = picked
+
+    run_path_planning(
+        depth_path=depth_path,
+        intrinsics_path=intrinsics_path,
+        rgb_path=rgb_path,
+        start=start,
+        goal=goal,
+        path_out=args.path_out,
+        **geo,
+    )
     return 0
 
 

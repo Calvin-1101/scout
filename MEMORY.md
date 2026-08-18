@@ -178,3 +178,55 @@ uv run python plan_ugv_path.py `
    add BEV smoothing before slope so the cost map is less speckled.
 5. Scale up next:
    batch-process multiple UAV frames and (optionally) temporally fuse BEV elevation/cost for smoother planning.
+
+---
+
+# Memory — UAV depth to UGV path pipeline
+
+Last updated: Saturday Aug 15, 2026, 7:13 PM (UTC+8)
+
+## What was built
+
+- RGB-only prep: `prepare_rgb_only.py` (Depth Anything V2 Metric → 16-bit mm `raw_depth.png` + FOV/EXIF `intrinsics.txt`).
+- LingBot refinement still via `example.py`.
+- Navigation stack in `nav/`: `elevation.py`, `traversability.py`, `astar.py`.
+- Human-readable overlay + click picker: `pick_nav_points.py` writes `cost_on_rgb.png` (green 0.0 / yellow 0.5 / red 1.0).
+- Planner CLI: `plan_ugv_path.py` (BEV elevation → slope cost → A* from pixel `--start u,v --goal u,v`).
+- Orchestrator: `run_uav_navigation.py` chains prepare → `example.py` → pick overlay → parse printed START/GOAL from stdout → auto-run A*.
+- CUDA env: PyTorch `2.6.0+cu124` + matching xformers (CPU torch fails xformers attention).
+
+## Decisions made
+
+- Research setup is UAV **oblique forward-looking** RGB; path is for a **UGV dog**.
+- Start/goal are **image pixels** `(u,v)`, not BEV cells.
+- Cost is **slope on BEV**, not semantic path vs grass. Yellow walkway vs green lawn is expected.
+- Outdoor RGB-only demos use `--no-mask` so LingBot does not punch black holes.
+- Orchestrator calls **repo-root** scripts (`prepare_rgb_only.py`, `pick_nav_points.py`, `plan_ugv_path.py`), not `helper/`.
+- Default park-tuning: `--pitch-deg -35 --cam-height-m 15 --resolution 0.5 --slope-safe 30 --slope-max 55`.
+
+## Problems solved
+
+- CPU PyTorch vs CUDA xformers mismatch; install cu124 wheels from PyTorch index.
+- Windows `UnicodeEncodeError` on `example.py` emojis: `$env:PYTHONIOENCODING='utf-8'`.
+- Mixed-resolution leftover `raw_depth.png` vs new RGB broke concat in `example.py`.
+- `cost_map.png` is a tiny BEV footprint; pick points on `cost_on_rgb.png` instead.
+- Click-vs-planner mismatch: `pixel_to_bev_index()` cropped depth to 1×1 so `cx/cy` were wrong. Now backprojects with absolute `(u,v)`. Confirmed: `(69,1222)` and `(888,894)` map to cost 0.5 and A* finds a path (44 cells).
+- Stale `path_on_rgb.png` if planning fails (file not overwritten). Use a fresh `--out` folder.
+
+## Current state
+
+- End-to-end **works** on park (`1080×1350`): prepare → refine → click yellow/green → A*.
+- `run_uav_navigation.py` exists and auto-plans after clicks when stdout is captured.
+- Cost overlay is noisy/speckled; passable corridors are small. Guessed pitch/height/intrinsics; RGB-only depth is synthetic.
+- Park image: `examples/sample_pictures/park.jpg` → typically `examples/my_scene/` + `result_my_scene/` + `result_path_park/`.
+
+## Next session starts with
+
+Verify one park run of `uv run python run_uav_navigation.py --image "examples/sample_pictures/park.jpg" --scene outdoor --no-mask --pitch-deg -35 --cam-height-m 15 --resolution 0.5 --slope-safe 30 --slope-max 55 --path-out result_path_park` (click START then GOAL; planning should run automatically). Then add non-interactive auto start/goal (largest connected passable region).
+
+## Open questions
+
+- Whether to add BEV elevation smoothing before slope (reduce speckle).
+- Whether to batch UAV frames / temporally fuse BEV.
+- Real UAV extrinsics (gimbal pitch, AGL) vs the guessed defaults.
+- Keep calling root scripts vs moving implementations fully into `helper/`.

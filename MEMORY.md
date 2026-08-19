@@ -230,3 +230,57 @@ Verify one park run of `uv run python run_uav_navigation.py --image "examples/sa
 - Whether to batch UAV frames / temporally fuse BEV.
 - Real UAV extrinsics (gimbal pitch, AGL) vs the guessed defaults.
 - Keep calling root scripts vs moving implementations fully into `helper/`.
+
+---
+
+# Memory — Auto start/goal; single-image hold; video path next
+
+Last updated: Thursday Aug 20, 2026, 1:13 AM (UTC+8)
+
+## What was built
+
+- Park E2E verified (prepare → LingBot `--no-mask` → overlay → A*). Known-good click coords `69,1222` → `888,894` still yield 44 cells. CUDA RTX 3060; Triton missing is a harmless warning.
+- Auto start/goal: `nav/waypoints.py` (`select_start_goal`). Start = passable pixel nearest bottom-left of the image. Goal = farthest reachable BEV cell in that 8-connected passable component (Euclidean ground meters, not max depth). A* then shortest path.
+- `run_uav_navigation.py`: auto-pick by default; removed `--start` / `--goal` / `--skip-click-ui`; added `--click-ui` (incomplete clicks fall back to auto). Internal `plan_ugv_path.py` still takes `--start/--goal` as plumbing.
+- Park auto-pick: `START 0,1349`, `GOAL 878,740`, **72-cell** path in `result_path_park/`.
+
+## Decisions made
+
+- No guessed pixel coords on the public orchestrator. Click is opt-in (`--click-ui`).
+- Cost remains **BEV slope**, not walkway vs grass. Overlay “accuracy” is pose + slope + resolution, not semantic segmentation.
+- Tune overlay in order: `--cam-height-m` / `--pitch-deg` / `--fov` first, then `--slope-safe` / `--slope-max`, then `--resolution`.
+- Park defaults still `--pitch-deg -35 --cam-height-m 15 --fov 65 --resolution 0.5 --slope-safe 30 --slope-max 55`, but the stock park photo may be near-path (try ~`--pitch-deg -15 --cam-height-m 2`) rather than 15 m AGL.
+- Single-image pipeline is **on hold**. Next feature is **video → frames → per-frame A* → stitch a coherent UGV path** (adopt open-source tools where useful).
+
+## Problems solved
+
+- Interactive OpenCV picker cannot be driven from this agent; verify with auto-pick or `--click-ui` locally.
+- User does not want to guesstimate `--start/--goal` pixels.
+- Speckle / path cutting through ornamental grass / goal on a pole: expected with slope-only cost and noisy synthetic depth; not fixed by more click tuning.
+
+## Current state
+
+- Single-image workflow **works**: one RGB → depth (Depth Anything + LingBot) → auto start/goal → A*.
+- Overlay is noisy; geometry is guessed; depth is synthetic. BEV smoothing / obstacle height **not implemented**.
+- Typical park outputs: `examples/my_scene/`, `result_my_scene/`, `result_path_park/` (`result*/` gitignored).
+- One-command:
+
+```powershell
+uv run python run_uav_navigation.py `
+  --image "examples/sample_pictures/park.jpg" `
+  --scene outdoor --no-mask `
+  --pitch-deg -35 --cam-height-m 15 --resolution 0.5 `
+  --slope-safe 30 --slope-max 55 `
+  --path-out result_path_park
+```
+
+## Next session starts with
+
+Start the **video path** feature (new conversation): slice UAV video into frames, run the existing single-image pipeline per frame, then string per-frame A* paths into one coherent UGV trajectory. Survey/adopt open-source frame extractors before writing a custom slicer. Do not resume overlay/smoothing unless asked.
+
+## Open questions
+
+- Frame rate / which frames to keep (every Nth vs keyframes) and how to temporally fuse or stitch paths (BEV alignment vs image-space vs robot odometry).
+- Whether to add BEV elevation smoothing / min obstacle height (park overlay quality) — deferred.
+- Real UAV extrinsics (gimbal pitch, AGL) vs guessed defaults; real FOV vs `--fov 65`.
+- Depth Anything is still image-only; video must be decomposed to frames first.
